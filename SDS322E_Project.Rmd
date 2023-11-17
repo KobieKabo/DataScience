@@ -1,0 +1,309 @@
+---
+title: "Violent Crime Reports in the City of Austin"
+output: html_document
+date: "Jakob Long, 2023/10/27"
+---
+
+# Dataset & Project Information -
+
+## Potential Trigger Warning:
+
+**The contents of this project discuss violent crimes that have occurred within Austin over the last two decades. This includes crimes such as assault & sexual assault.**
+
+## Abstract:
+
+When moving to a new city for a new job, educational pursuit, or even a change on environment, the level of crime is something an individual would like to know. As such this project aims to identify a trend of the level of violent crimes, and the status of the cases. This dataset was pulled from the public data portal managed by the city of Austin: <https://data.austintexas.gov/Public-Safety/Crime-Reports/fdj4-gpfu>.
+
+As I have been a resident of Austin for the past three years, and have both personally witnessed and been a victim of violent crime, I chose this dataset primarily to see the prevalence of these acts within Austin, and see if there has been a trend over the past two decades or so. To begin this I started with some introductory analysis of the dataset, to uncover any patterns that may be present. As such I'm curious to see if the trend of violent crime has decreased over the past two decades within Austin.
+
+This article [https://theaustinindependent.org/austin-homicides-part-2-just-the-facts](https://theaustinindependent.org/austin-homicides-part-2-just-the-facts/) is an article that investigates homicides around the city of Austin & is a reason why I'd chosen to investigate violent crime in particular. As the dissection of age, gender and racial groupings for homicidal rates, while potentially controversial, is a topic of interest to see which groups are statistically more vulnerable.
+
+## Additional Dataset Information:
+
+The dataset over thirty different variables, all of which are clearly defined on a table in the link provided above. However, there's one category that needs additonal information in order to understand, and thats the UCR FBi categorization values. By using the following link: <https://ucr.fbi.gov/nibrs/2011/resources/nibrs-offense-codes>, we can see what each UCR category means as defined by the FBI. After tidying the data, I'll be sure to explicitly share the meaning of the remaining codes within our table.
+
+Additionally, we need to note that there could be a skew in our visualizations, as I only pulled the first 100,000 observations from a dataset with over 2 million rows. This is likely to result in skewed data, but I believe it will primarily affect the year of which crimes occurred in, as we may pull more data from 2023, than other years due to the data set being updated on a weekly basis.
+
+```{r setup, include=FALSE}
+#installing necessary packages
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(tidyverse)
+library(maps)
+```
+
+## Uploading Dataset:
+
+```{r}
+# Uploading datset, ignore warnings as we're going to tidy our data anyway.
+COA_crime <- (read_csv('COA_crime.csv', show_col_types = F))
+```
+
+## Printing Dataset Summary Statistics:
+
+```{r}
+summary(COA_crime)
+```
+
+## Printing Dataset Structure:
+
+```{r}
+str(COA_crime)
+dim(COA_crime)
+```
+
+# Cleaning Data -
+
+## Tidying our Dataset:
+
+The dataset, as is is already fairly tidy but we'll need to remove & add some columns to make the dataset easier to manipulate, and to not consume as many computational resources.
+
+The dataset started with over 100,000 observations (rows), and 28 variables (columns).
+
+```{r}
+# Keeping only columns of interest, to remove clutter.
+COA_crime <- select(COA_crime, c('Incident Number',
+                                 'Highest Offense Description',
+                                 'Highest Offense Code',
+                                 'Clearance Status',
+                                 'Occurred Date Time',
+                                 'Latitude',
+                                 'Longitude',
+                                 'UCR Category'))
+
+# Converts the Character values to a string, formats the 'values' into month, day year etc.. based on the seperators.
+COA_crime$`Occurred Date Time` <- as.POSIXct(COA_crime$`Occurred Date Time`, format = "%m/%d/%Y %I:%M:%S %p")
+
+# Creates a list of the months of the year, for adjustment of data frame later
+month.name <- c('Jan','Feb','March','April','May','June','July','Aug','Sept','Oct','Nov','Dec')
+
+# Adds 3 new columns of Occurrence Month, time & year for easier sorting / manipulation
+COA_crime |>
+  filter(!is.na(`Incident Number`)) |>
+  mutate(
+    Occurred_Month = as.integer(format(`Occurred Date Time`,'%m')),
+    # Immediately updates the month from an integer, to the corresponding month
+    Occurred_Month = month.name[Occurred_Month],
+    Occurred_Year = as.integer(format(`Occurred Date Time`,'%Y')),
+    Occurred_Time = as.integer(format(`Occurred Date Time`, '%H%M'))) ->COA_crime
+
+# factors months to ensure they show in the correct order
+COA_crime$Occurred_Month <- factor(COA_crime$Occurred_Month, levels = month.name)
+dim(COA_crime)
+```
+
+Following the tidying that occurred above, I left only 8 columns from the original 28, but then chose to add three more from the data available already within the 8 columns left. The reason for doing so was for easier manipulation, and for an easier time reading the table for specific monthly/yearly occurrences. Thus we have 100,000 rows and 11 columns. However, we're still not quite done tidying the data.
+
+```{r}
+# Removes all reports that lack a UCR categorization
+COA_crime |>
+  filter(!is.na(`UCR Category`)) |>
+  group_by(`UCR Category`) |>
+  filter(str_detect(`Highest Offense Description`,'RAPE') |
+         str_detect(`Highest Offense Description`,'ASSAULT')) -> COA_crime
+dim(COA_crime)
+```
+
+With this filter, I then changed the data set from 100,000 rows to that of only 14,822. A sizeable change, but now our dataset only includes reports that involved a violent crime of Rape or Assault. Leaving us with only 14,822 rows and 11 columns.
+
+The reason why I chose to filter by UCR category, is due to the fact that the original dataset has a lot of observations missing data for this variable, and since my inquiry is about violent crime, the UCR categorization is quite important.
+
+```{r}
+# Returns # of reports that have a UCR category, that have a Rape/Assault description
+COA_crime |>
+  group_by(`UCR Category`) |>
+  summarize(n = n())
+```
+
+This simple summary, returns the number of UCR categories left in our dataset, and the number of reports that correspond to each one.
+
+## Printing Post-Cleaned Data:
+
+```{r}
+summary(COA_crime)
+```
+
+```{r}
+str(COA_crime)
+```
+
+# Data Analysis:
+
+## Yearly Occurrence, Clearance Status & UCR Category:
+
+Initially, we can begin by looking at the relationship between the number of crime reports per year & the number of crime reports in each month since 2003.
+
+```{r}
+# Bar plot of frequency of crime reports & the associated year
+COA_crime |>
+  ggplot() +
+  geom_bar(aes(x = Occurred_Year),
+                 fill = 'blue',
+                 color = 'black',
+                 na.rm = T) + 
+  scale_x_continuous(breaks = seq(2003,2023, by = 1)) + 
+  scale_y_continuous(breaks = seq(0,900,by = 100)) + 
+  theme(axis.text.x = element_text(angle = 45))+
+  labs(y = 'Number of Crimes Reported',
+       x = 'Year',
+       title = 'Annual number of Rape/Assault crime reports',
+       subtitle = 'Only includes Rape/Assault crimes that have a UCR category',
+       caption = 'Sourced from: City of Austin, Texas - data.austintexas.gov')
+
+# Bar plot of frequency of crime reports & associated Month
+COA_crime |>
+  filter(!is.na(Occurred_Month))|>
+  group_by(Occurred_Month) |>
+  summarize(count = n()) |>
+  ggplot() +
+  geom_bar(aes(x = Occurred_Month, y = count),
+                 stat = 'identity',
+                 fill = 'blue',
+                 color = 'black',
+                 na.rm = T) +
+  scale_y_continuous(breaks = seq(0,1400,by = 200)) +
+  theme(axis.text.x = element_text(angle = 45))+
+  labs(y = 'Number of Crimes Reported',
+       x = 'Month',
+       title = 'Annual number of Rape/Assault crime reports',
+       subtitle = 'Only includes Rape/Assault crimes that have a UCR category',
+       caption = 'Sourced from: City of Austin, Texas - data.austintexas.gov')
+```
+
+See a trend that the number of annual reports seemed consistent, but with a fairly significant dip from 2019-2021. This makes sense as that was when covid was quite rampant, and public interaction was at a low. However, what's interesting is that there isn't a seemingly positive or negative trend in violent crimes, but rather a consistent number of them happen yearly. This is indicative that violent crime rate has stayed consistent over the past few decades.
+
+This same trend is present as we take a look at the monthly occurrence that takes in the data for all years. We see that each month have a similar number of reports, with the winter season having fewer overall than the other seasons.
+
+## Clearance Status Of Yearly Reports:
+
+```{r}
+COA_crime |>
+  group_by(`Clearance Status`)|>
+  ggplot() +
+  geom_bar(aes(x = Occurred_Year, fill = `Clearance Status`),
+           na.rm = T,
+           color = 'black') + 
+  scale_x_continuous(breaks = seq(2003,2023, by = 1)) + 
+  scale_y_continuous(breaks = seq(0,900,by = 100)) + 
+  theme(axis.text.x = element_text(angle = 45))+
+  labs(y = 'Number of Crimes Reported',
+       x = 'Year',
+       title = 'Annual number of Rape/Assault crime reports',
+       subtitle = 'Only includes Rape/Assault crimes that have a UCR category',
+       caption = 'Sourced from: City of Austin, Texas - data.austintexas.gov')
+```
+
+Each clearance status has a specific meaning, that can actually be a little deceiving, so here's the meaning for each status:
+
+-   C - Means the report was cleared by an arrest
+
+-   N - Means the report has not been cleared yet
+
+-   O - Means the report was cleared by an exception
+
+-   N/A - Means that the Clearance status was missing for this report.
+
+Now equipped with the specific meanings, we can understand what the plot is informing us about. If we take a look at the plot from 2008 and onward we can see a large number of the reports are still uncleared, meaning the case hasn't been resolved.
+
+Additionally, from 2003-2008, we can see the largest number of N/A's, this is likely due a to lack of digitization of reports and as a result, a number of cases and reports are missing the proper paperwork to classify them as closed or not.
+
+We should also understand, that while the case may not be 'cleared' it might be closed, whether that means the perpetrator turned themselves in, died, or the case going cold. This doesn't imply that there are violent criminals roaming about, but simply states that a large number of cases go uncleared, as presented by the plot.
+
+## UCR Categorization of Yearly Reports:
+
+```{r}
+COA_crime |>
+  group_by(`Clearance Status`)|>
+  ggplot() +
+  geom_bar(aes(x = Occurred_Year, fill = `UCR Category`),
+           # removes only 9 rows, so it's not very impactful on the data
+           na.rm = T,
+           color = 'black') + 
+  scale_x_continuous(breaks = seq(2003,2023, by = 1)) + 
+  scale_y_continuous(breaks = seq(0,900,by = 100)) + 
+  theme(axis.text.x = element_text(angle = 45))+
+  labs(y = 'Number of Crimes Reported',
+       x = 'Year',
+       title = 'Annual number of Rape/Assault crime reports',
+       subtitle = 'Only includes Rape/Assault crimes that have a UCR category',
+       caption = 'Sourced from: City of Austin, Texas - data.austintexas.gov')
+```
+
+Now this is the same plot as above, but rather than coloring by clearance status, we're now taking a look at the UCR categorization as defined by the FBI. Similar as above, the four UCR categories are as follows:
+
+-   11A - Forcible Rape
+
+-   11C - Sexual Assault with an Object
+
+-   120 - Robbery, against property
+
+-   13A - Aggravated Assault
+
+Here we're able to see the frequency of each crime on a yearly basis. As such we see a much larger spike in aggravated assault within the last two years (2022,2023), as compared to every other year. This is likely due to the nature of the dataset missing a larger number of UCR categorizations as mentioned earlier.
+
+However, a alarming consistency is the number of sexual assaults that have occurred within each year, as these two categories alone make up nearly the majority of each year.
+
+## Clearance Status & UCR Categorization:
+
+```{r}
+# Creates bar graph showing 
+COA_crime |>
+  group_by(`Clearance Status`) |>
+  ggplot(mapping = aes(x = `Clearance Status`,
+                       fill = `UCR Category`))+
+  geom_bar(color = 'black')+
+  labs(y = 'Number of Reports',
+       x = 'Status of Report',
+       title = 'Clearance Status of Reports & UCR category',
+       subtitle = 'Only includes Rape/Assault crimes that have a UCR category',
+       caption = 'Sourced from: City of Austin, Texas - data.austintexas.gov')
+
+# Creates a pie-chart & builds # of percentages of each clearance status 
+COA_crime |>
+  group_by(`Clearance Status`) |>
+  summarize(counts = n(),
+            percentages = n()/nrow(COA_crime)) |>
+  ggplot(mapping = aes(x="", y = percentages, fill = `Clearance Status`)) +
+  geom_col()+
+  coord_polar("y") +
+  theme(panel.background = element_blank(),                                    
+      axis.line = element_blank(),
+      axis.text = element_blank(),
+      axis.ticks = element_blank(),
+      axis.title = element_blank(),
+      plot.title = element_text(hjust = 0.5, size = 18)) +
+  geom_text(aes(x = 1.6,label = paste0(round(percentages*100),"%")),
+            position = position_stack(vjust = 0.1)) +
+  ggtitle("Percentages of Report Clearance Status") + 
+  labs(caption = 'Sourced from: City of Austin, Texas - data.austintexas.gov')
+```
+
+From the bar graph, similar to the annual graph that had UCR categories, we see a trend of 11A and 11C cases being the majority. Additonally, we see that nearly half of our total observations are under status N, meaning the case hasn't been closed.
+
+These percentages are more easily seen on the pie chart. As We can clearly see that 45% of total cases observed have not been closed, and 44% of them have. With 23% of those closed being by arrest, and the remaining 21% by exception.
+
+We do have large number of cases that are missing a clearance status, 11%. This is over 1400 cases, with respect to our tidied dataset, of approximately 15,000 observations.
+
+# Conclusion:
+
+## Reflection:
+
+From the visualizations, and analysis of patterns present within the dataset after tidying, we can see that crimes of sexual nature are quite present within Austin, and have clearly been for sometime. As for violent crimes, such as assault or aggravated robbery, the data is missing quite a significant number of categorizations. Thus, we cannot make clear assumptions of the trend of those crimes due to a lack of information. However, using the sexual crimes as a baseline, I would presume that the other violent crimes would follow a similar trend of consistency across the years. Thus, the rate of violent crime has not decreased as I would have assumed over the past two decades, as society has grown to be more accepting and understanding.
+
+### Ethical Concerns:
+
+The purpose of this project is not to spread fear mongering data that Austin is a city full of violent crimes. That is however, something that could be possible from this analysis, as the plots can be misleading by showing large bars of crime reports for each year. Through this, the already tense relationship law enforcement and the public could be worsened by seeing the large number of cases that have been left uncleared, albeit the many reasons a case would be left uncleared. Those reasons are not explicitly shared on the graphs, as they were not present within the data.
+
+### Construction of the Project:
+
+While doing this project, the most difficult part, unsurprisingly, was the 'tidying', or reorganization of the data. As I had ran into multiple issues, such as having to convert the values to a different data type for easier use, or thinking of ways to change a value from the 12 hour clock to that of the 24 hour clock.
+
+Additionally, if possible I would share with the city of Austin, that the number of UCR categories missing within the dataset is quite significant, and to try and fix that via cooperation with APD, and the FBI UCR offense code reporting system.
+
+## Sources/Acknowledgements:
+
+Data source : <https://data.austintexas.gov/Public-Safety/Crime-Reports/fdj4-gpfu>
+
+"Uniform Crime Reporting (UCR) Program National Incident-Based Reporting System (NIBRS)", FBI, 2011 <https://ucr.fbi.gov/nibrs/2011/resources/nibrs-offense-codes>
+
+FBI UCR Offense Definitions: <https://ucr.fbi.gov/crime-in-the-u.s/2019/crime-in-the-u.s.-2019/topic-pages/offense-definitions>
