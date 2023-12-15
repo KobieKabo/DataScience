@@ -1,0 +1,294 @@
+---
+title: "City of Austin Car Crashes & Fatality/Injury Rates"
+output: html_document
+date: "Jakob Long, 2023/12/1"
+---
+
+# Dataset & Project Information -
+
+## Abstract:
+
+Driving in Texas is always an interesting journey, from the jokes about the speed limit being a suggestion, to drivers being incapable of driving during inclement weather. The purpose of this investigation was to assess the frequency of which car crashes occur & if they were fatal or not. This is accompanied by visualizations regarding speed of crash, street types they occured on & the severity of the crash. Additonallly, a logistical model was developed, and cross validated, to predict whether or not a crash was fatal. This dataset was pulled from the public data portal managed by the city of Austin: <https://data.austintexas.gov/Transportation-and-Mobility/Austin-Crash-Report-Data-Crash-Level-Records/y2wy-tgr5>.
+
+This document: <https://safety.fhwa.dot.gov/speedmgt/ref_mats/fhwasa1304/Resources3/08%20-%20The%20Relation%20Between%20Speed%20and%20Crashes.pdf> is a publication from SWOV, the Institute for Road Safety Research located in the Netherlands. Within this publication the research between the fatality of a crash & the speed of the vehicle causing the crash was investigated. This document helped in the choosing of this dataset as it provided a scientifically generalized idea that speed kills. I do however, wish that this dataset contained the weight the passenger cars so I could more closely follow the investigation regarding a vehicles mass when looking at fatal crashes at specific speeds.
+
+## Additional Dataset Information:
+
+The dataset is populated by the TXDOT's, (Texas Department of Transportation) Crash Reporting Information System (CRIS), which is populated by reports documented by Police officers throughout the state. This data is holds data going back ten years only within the Austin Area & is managed by the Austin Transportation & Public Works Department.
+
+Additionally, a link is provided within the sources section that aides in understanding the differences between the street types & their naming conventions! Digesting that information is helpful in fully understanding the implications of the results gathered here.
+
+```{r setup, include=FALSE}
+#installing necessary packages
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(tidyverse)
+library(maps)
+library(plotROC)
+library(caret)
+```
+
+## Uploading Dataset:
+
+```{r}
+# Uploading datset
+CarCrash <- read.csv("Austin_Crash_Report_Data_-_Crash_Level_Records_20231119.csv")
+head(CarCrash)
+dim(CarCrash)
+```
+
+I neglected original structure & summary of the dataset, to avoid clutter. But from the table above & the dimensions we can see that the original dataset contained 148,482 observations with 54 different variables for each observation. This is a lot of data to tidy!
+
+# Cleaning Data -
+
+## Tidying our Dataset:
+
+```{r}
+# Reduces columns in dataset to those that are relevant for our investigation.
+CarCrash <- CarCrash |>
+  dplyr::select(crash_fatal_fl,rpt_street_sfx,crash_speed_limit,crash_sev_id,
+         tot_injry_cnt,units_involved,motor_vehicle_fl,motorcycle_fl,road_constr_zone_fl) |>
+  # removes rows that have a nonsense speed limit value & street suffix
+  # removes rows that dont involve a Passenger Car
+  filter(!is.na(crash_speed_limit),
+         crash_speed_limit > -1,
+         rpt_street_sfx != '',
+         motor_vehicle_fl == 'Y')
+```
+
+```{r}
+CarCrash <- CarCrash |>
+  # renames variables for easier/quicker understanding
+  rename(Fatal_Crash = crash_fatal_fl, Street_Type = rpt_street_sfx,
+         Speed_Limit = crash_speed_limit, Crash_Severity = crash_sev_id,
+         Total_Injured = tot_injry_cnt, Construction_Zone = road_constr_zone_fl) |>
+  # Factorizing street types & renaming Crash_Severity to a meaningful description & factorizes it
+  mutate(Street_Type = as.factor(Street_Type))
+```
+
+A significant amount of data tidying was not necessary, so I simply removed unnecessary columns, and reduced the number of observations as shown above. I additionally added levels to the Street_Type variable so that the logistical model would account for the differences between streets & their frequency in which crashes occur. I would have done the same for the units_involved variable; however, since each observation is a unique car crash the types of vehicles involved is too diverse to be able to factorize the variable for meaningful & effective information.
+
+## Printing Post-Cleaned Data:
+
+```{r}
+summary(CarCrash)
+```
+
+```{r}
+str(CarCrash)
+dim(CarCrash)
+```
+
+After tidying our data we reduced our number of observations from 148,482 -\> 74,385, and down from 54 variables to 9! This allows for faster computation & hopefully an increase in our stability of our model and interpret-ability!
+
+# Data Analysis:
+
+## Investigating a predictive model for fatal crashes:
+
+```{r, warning = FALSE}
+CarCrash <- CarCrash |>
+  mutate(Fatal_Crash = ifelse(Fatal_Crash == 'Y',1,0),
+         motorcycle_fl = ifelse(motorcycle_fl == 'Y',1,0),
+         Construction_Zone = ifelse(Construction_Zone == 'Y',1,0))
+crash_fatal_reg <- glm(Fatal_Crash ~ Street_Type + Speed_Limit +
+                   Crash_Severity + Total_Injured + motorcycle_fl + Construction_Zone,
+                   data = CarCrash,
+                   family = 'binomial')
+summary(crash_fatal_reg)
+```
+
+Here I've constructed a logistic regression model to predict whether a crash is fatal or not. From the summary output above we're able to see that only 3 of our variables are statistically significant towards the model: MotorCycle_fl, Crash_Severity, Speed_Limit, while two others are statistically significant to the base level which for this model was Street_TypeAVE: Street_TypeST & Street_TypeEXPY.
+
+## Investigating Model Performance:
+
+```{r, warning=FALSE}
+ROC_crash_fatal <- CarCrash |>
+  # Make predictions
+  mutate(probability = predict(crash_fatal_reg, type = "response")) |>
+  ggplot() + 
+  geom_roc(aes(d = Fatal_Crash, m = probability), n.cuts = 10)
+ROC_crash_fatal
+calc_auc(ROC_crash_fatal)$AUC
+```
+
+```{r, warning=FALSE}
+# Make this example reproducible by setting a seed
+set.seed(322)
+
+# Choose number of folds
+k = 5
+
+# Randomly order rows in the dataset
+data <- CarCrash[sample(nrow(CarCrash)), ] 
+
+# Create k folds from the dataset
+folds <- cut(seq(1:nrow(data)), breaks = k, labels = FALSE)
+
+# Initialize a vector to keep track of the performance
+perf_k <- NULL
+
+# Use a for loop to get diagnostics for each test dataset
+for(i in 1:k){
+  # Create train and test datasets
+  train_not_i <- data[folds != i, ] # all observations except in fold i
+  test_i <- data[folds == i, ]  # all observations in fold i
+  
+  # Train model on train data (all but fold i)
+  train_model_reg <- glm(Fatal_Crash ~ Street_Type + Speed_Limit +
+                         Crash_Severity + Total_Injured + motorcycle_fl,
+                         data = train_not_i,
+                         family = 'binomial')
+  
+  # Performance listed for each test data (fold i) 
+  perf_k[i] <- sqrt(mean((
+    test_i$Fatal_Crash - predict(train_model_reg, newdata = test_i))^2, 
+    na.rm = TRUE))
+  
+}
+
+# Average performance over all k folds and variation
+round(mean(perf_k),digits = 2)
+round(sd(perf_k),digits = 2)
+```
+
+From above we can see that our model is not the best performing model, as it had an ROC AUC score of 0.677, or about 0.68. Meaning that the model has a 68% chance of accurately predicting if a crash will result in a fatality or not. This is not exactly ideal, as theres a significant margin of error when using this model.
+
+However, when the k-folds cross validation was performed the model performed fairly well across multiple test sets! As our standard deviation value was close to zero, meaning that across the 5 different folds our model had approximately the exact same performance! Meaning that the model is okay for testing new observations.
+
+## Investigating speed of crashes & their fatality:
+
+```{r}
+# Reinitializing Datframe from 1/0 -> Y/N & Renaming Crash_Severity for meaningful descriptions
+CarCrash <- CarCrash |>
+  mutate(Crash_Severity = recode(Crash_Severity,
+                                 `0` = "unknown",
+                                 `1` = "incapacitating injury",
+                                 `2` = "non-incapacitating injury",
+                                 `3` = "possible injury",
+                                 `4` = "killed",
+                                 `5` = "not injured",
+                                 .default = 'unknown'),
+         Fatal_Crash = ifelse(Fatal_Crash == '1','Y','N'))
+
+# Getting percentages of fatal Crashes
+Crash_Fatality <- CarCrash |>
+  group_by(Fatal_Crash) |>
+  summarize(Percentage = round((n()/nrow(CarCrash))*100,digits = 4))
+Crash_Fatality
+
+# Plots distribution frequency of crash speed for crashes that were fatal
+CarCrash |>
+  filter(Fatal_Crash == 'Y') |>
+  ggplot() +
+  geom_histogram(aes(x = Speed_Limit),
+                 binwidth = 10,
+                 center = 5,
+                 color = 'black',
+                 fill = 'blue') +
+  scale_x_continuous(breaks = seq(20,80,10)) +
+  scale_y_continuous(breaks = seq(0,140,10)) +
+  labs(x = 'Speed of car at crash',
+       y = '# of crashes',
+       title = 'Number of reported fatal crashes & their speed',
+       subtitle = 'Only includes reported crashes involving a Passenger Car',
+       caption = 'Sourced from: City of Austin, Texas - data.austintexas.gov')
+
+# Plots distribution frequency of crash speed for crashes that were non-fatal
+CarCrash |>
+  filter(Fatal_Crash == 'N',
+         !Crash_Severity == 'killed') |>
+  ggplot() +
+  geom_histogram(aes(x = Speed_Limit,fill = Crash_Severity),
+                 binwidth = 10,
+                 center = 5,
+                 color = 'black') +
+  scale_x_continuous(breaks = seq(0,80,10)) +
+  scale_y_continuous(breaks = seq(0,25000,2500)) +
+  labs(x = 'Speed of car at crash',
+       y = '# of crashes',
+       title = 'Number of reported non-fatal crashes & their speed',
+       subtitle = 'Only includes reported crashes involving a Passenger Car',
+       caption = 'Sourced from: City of Austin, Texas - data.austintexas.gov')
+```
+
+From the two above plots we're able to see that a majority of all crashes happen within the range of 30 Mph, and 50 Mph. Which makes sense, as drivers are typically more alert and aware when driving at both slower and faster speeds. As driving at a faster speed requires more caution and control over the car, while slower speeds have a larger tolerance for reaction timing for braking or swerving to avoid a crash.
+
+Interestingly enough we also see that both the fatal and non-fatal crashes share a similarly shaped histogram, that appears to have a right skewed distribution.
+
+Additionally, we can see from tibble above, less than 1% of the reported crashes we're observing resulted in a reported fatality.
+
+## Investigating street types & crash frequency:
+
+```{r,warning=FALSE}
+Crash_Fatality <- CarCrash |>
+  filter(Fatal_Crash == 'Y') |>
+  group_by(Street_Type) |>
+  summarize(Percentage = round((n()/nrow(CarCrash))*100,digits = 4)) |>
+  arrange(Percentage)
+Crash_Fatality
+
+CarCrash |>
+  group_by(Street_Type)
+# Plots frequency distribution for the street type a crash occured
+CarCrash |>
+  group_by(Street_Type) |>
+  # filters out street types that have less than 500 reported crashes, to not clog the plot
+  filter(n() > 500,
+         Fatal_Crash == 'N',
+         !Crash_Severity == 'killed') |>
+  ggplot() +
+  geom_bar(aes(x = Street_Type, fill = Crash_Severity),
+           color = 'black') +
+  labs(x = 'Street type crash occurred',
+       y = '# of crashes',
+       title = 'Street type of a non-fatal crash occurrence',
+       subtitle = 'Only includes streets with more than 500 crashes & involving a passenger car',
+       caption = 'Sourced from: City of Austin, Texas - data.austintexas.gov') +
+  scale_y_continuous(breaks = seq(0,15000,1000))
+
+# Plots frequency distribution for the street type a crash occurred
+CarCrash |>
+  group_by(Street_Type) |>
+  # filters out street types that have less than 500 reported crashes, to not clog the data
+  filter(n() > 500,
+         # plots only fata crashes
+         Fatal_Crash == 'Y') |>
+  ggplot() +
+  geom_bar(aes(x = Street_Type),
+           color = 'black',
+           fill = 'blue') +
+  labs(x = 'Street type crash occurred',
+       y = '# of crashes',
+       title = 'Street type of a fatal crash occurrence',
+       subtitle = 'Only includes streets with more than 500 crashes & involving a passenger car',
+       caption = 'Sourced from: City of Austin, Texas - data.austintexas.gov') +
+  scale_y_continuous(breaks = seq(0,95,5))
+```
+
+Similar to the distribution of reported speeds of crashes, the street types where crashes occcurred share a similar trend between both the fatal and non-fatal crash plots.
+
+Additionally, we're able to see that most fatal crashes occur on Boulevards which is interesting that it's not on a major roadway such as a Highway, Parkway, or Expressway.x\`
+
+# Conclusion:
+
+## Reflection:
+
+Despite the cross-validation performance being exceptional, the overall models performance is still lacking, thus the model is not quite a good fit for what we set out to achieve. However, if we were to possibly add more variables, such as vehicle weight as stated in the SWOV study, the performance of the model would likely increase! This could be done by adding the year, make & models of the vehicles involved in the accident so that way the weights of each vehicle could be added retroactively by referencing the manufacturer's spec sheets for the vehicle.
+
+### Ethical Concerns:
+
+Some concerns with the analysis of this data could be an assumption that certain road types are more unsafe than others due to having a larger number of accidents. As the plots above displayed Boulevards having the highest frequency of accidents, but that doesn't necessarily mean that streets named as a boulevard are more dangerous to drive on. The data tested does not include weather conditions, time of day or year all of which are influential factors.
+
+### Construction of the Project:
+
+While doing this project, the most difficult part, unsurprisingly, was the 'tidying', or reorganization of the data. As I had ran into multiple issues, such as having to factorize my Street_Type variable so that each different type of street is accounted for. I then attempted to do this with my Crash_Severity, but that resulted in a model that had a ROC AUC value of 0.999, which makes sense since it includes a level where a fatality was guaranteed to have occurred. So statistically using that model didn't make a lot of sense.
+
+Additionally, if possible I would share with the city of Austin, that we should try and report the makes and models of vehicles so that way the weights of vehicles involved in the accidents can be added & accounted for. However, this would also need the speeds of all vehicles involved, and having a unique column for each in order to follow the scientific methods that were applied in the SWOV document below.
+
+## Sources/Acknowledgements:
+
+<https://www.kickassfacts.com/whats-the-difference-between-an-ave-rd-st-ln-dr-way-pl-blvd-etc/>
+
+<https://data.austintexas.gov/Transportation-and-Mobility/Austin-Crash-Report-Data-Crash-Level-Records/y2wy-tgr5>
+
+<https://safety.fhwa.dot.gov/speedmgt/ref_mats/fhwasa1304/Resources3/08%20-%20The%20Relation%20Between%20Speed%20and%20Crashes.pdf>
